@@ -24,13 +24,12 @@ go test -tags=integration -run='^TestIssue1RelayTLSFailure$' -count=1 -v .
 - LLM calls from probes: `0`.
 - Correlated outcome expected: `relay_path_tls_failure`.
 
-The new `classifyIncident` function in `correlation.go` is an explicit TODO baseline returning `unclassified`, so the integration test is **intentionally red** until the correlation logic is implemented. The test failure should show:
+The new `classifyIncident` function in `correlation.go` returns `relay_path_tls_failure` only when the direct path is healthy, CONNECT succeeded, and relayed TLS failed for the same target inside a 30s window. Negative controls (both paths fail, CONNECT fails, direct certificate failure, different targets) stay `unclassified`.
 
 ```
-Issue #1 RED: want relay_path_tls_failure after comparing both paths, got "unclassified"
+go test ./...
+go test -tags=integration -run='^TestIssue1RelayTLSFailure$' -count=1 -v .
 ```
-
-The existing unit tests (`go test ./...`) should continue to pass without the `integration` build tag.
 
 ## Acceptance criteria
 

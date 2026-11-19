@@ -162,9 +162,22 @@ func runProbe(target, proxy string, timeout time.Duration) Report {
 	return report
 }
 
+// Pair is the Issue #1 artifact: two probes of one target plus a correlation.
+// Stage evidence is kept verbatim. Incident is empty when the pair does not
+// meet the relay-TLS rule, so the tool does not invent a cause.
+type Pair struct {
+	Timestamp string `json:"timestamp"`
+	Target    string `json:"target"`
+	Direct    Report `json:"direct"`
+	Relay     Report `json:"relay"`
+	Incident  string `json:"incident"`
+	LLMCalls  int    `json:"llm_calls"`
+}
+
 func main() {
 	target := flag.String("target", "example.com:443", "HTTPS destination as host:port")
 	proxy := flag.String("proxy", "", "Optional HTTP CONNECT proxy as host:port")
+	compare := flag.Bool("compare", false, "Probe direct and -proxy, then correlate")
 	timeout := flag.Duration("timeout", 8*time.Second, "Timeout for each connection/check")
 	flag.Parse()
 
@@ -172,9 +185,35 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -target or -timeout")
 		os.Exit(2)
 	}
-	report := runProbe(*target, *proxy, *timeout)
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
+
+	if *compare {
+		if strings.TrimSpace(*proxy) == "" {
+			fmt.Fprintln(os.Stderr, "-compare requires -proxy")
+			os.Exit(2)
+		}
+		direct := runProbe(*target, "", *timeout)
+		relay := runProbe(*target, *proxy, *timeout)
+		pair := Pair{
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Target:    *target,
+			Direct:    direct,
+			Relay:     relay,
+			Incident:  classifyIncident(direct, relay),
+			LLMCalls:  direct.LLMCalls + relay.LLMCalls,
+		}
+		if err := encoder.Encode(pair); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if pair.Incident == "relay_path_tls_failure" || (direct.Outcome == "healthy" && relay.Outcome == "healthy") {
+			return
+		}
+		os.Exit(1)
+	}
+
+	report := runProbe(*target, *proxy, *timeout)
 	if err := encoder.Encode(report); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -1,77 +1,73 @@
-# Cloud Sentinel (early prototype)
+# Cloud Sentinel
 
-A small, open-source starting point for **evidence-based network incident diagnosis**. This repository contains a real, runnable Go probe and tests. It is **not yet** an autonomous SRE platform; the integrations below are a roadmap.
+A small Go probe that tells a **destination failure** apart from a **relay failure**. Uptime checks only see "down". This tool runs the same target twice — direct, then through an HTTP CONNECT proxy you own — and names a cause only when the evidence supports it.
 
-## What works today
+It does not call an LLM. `llm_calls` is always 0.
 
-- A Go CLI that performs deterministic **DNS -> TCP -> optional HTTP CONNECT -> TLS -> HTTP** checks.
-- JSON output with each stage's state, duration and error, plus a basic failure classification.
-- A zero-LLM-call monitoring path (the CLI does not use AI or external model APIs).
-- Unit tests for a TLS certificate failure and an unreachable TCP endpoint.
+## What it does
+
+Stages, in order: DNS, TCP, optional HTTP CONNECT, TLS 1.2+, HTTP GET.
+
+| Outcome | Meaning |
+|---|---|
+| `healthy` | TLS and HTTP both completed |
+| `dns_failure` | Local resolver failed and there is no proxy |
+| `tcp_failure` | Could not open TCP to the target or the proxy |
+| `connect_failure` | Proxy did not return `200 Connection Established` |
+| `tls_handshake_failure` | TCP (and CONNECT, if used) succeeded; TLS did not |
+| `http_failure` | TLS succeeded; HTTP failed or returned 5xx |
+
+`-compare` adds one extra field, `incident`:
+
+| Incident | When |
+|---|---|
+| `relay_path_tls_failure` | Direct path is `healthy`, CONNECT is `pass`, relayed TLS fails, same target, reports within 30s |
+| `unclassified` | Both paths fail, CONNECT itself fails, the direct path has a bad certificate, or the targets differ |
+
+The rule refuses a cause it cannot prove. Stage JSON is kept either way.
 
 ## Quick start
 
-Requires Go 1.22+.
+Go 1.22+.
 
 ```bash
 go test ./...
 go run . -target example.com:443
 ```
 
-Optional HTTP CONNECT relay check (use a proxy **you own or are authorized to test**):
+Compare a direct path with a proxy you are allowed to use:
 
 ```bash
-go run . -target example.com:443 -proxy 127.0.0.1:8888
+go run . -compare -target example.com:443 -proxy 127.0.0.1:8888
 ```
 
-The command prints a JSON report like this (illustrative, not a captured run):
+Issue #1 reproduction (local HTTPS fixture + a CONNECT relay that drops before TLS):
+
+```bash
+go test -tags=integration -run='^TestIssue1RelayTLSFailure$' -count=1 -v .
+docker compose run --rm issue1-repro
+```
+
+Sample compare output (shape, not a captured run):
 
 ```json
 {
-  "timestamp": "2026-11-19T00:00:00Z",
   "target": "example.com:443",
-  "route": "direct",
-  "stages": {
-    "dns": {"state": "pass", "latency_ms": 8},
-    "tcp": {"state": "pass", "latency_ms": 12},
-    "http_connect": {"state": "skipped"},
-    "tls": {"state": "pass", "latency_ms": 32},
-    "http": {"state": "pass", "latency_ms": 45}
-  },
-  "outcome": "healthy",
-  "llm_calls": 0
+  "incident": "relay_path_tls_failure",
+  "llm_calls": 0,
+  "direct": { "outcome": "healthy", "route": "direct" },
+  "relay": { "outcome": "tls_handshake_failure", "route": "http_connect_relay" }
 }
 ```
 
-## Architecture (current and proposed)
+## Tests
 
-```text
-[Go probes] ----JSON----> [FastAPI ingestion - planned]
-    |                         |
-    |                    [correlation rules - planned]
-    |                         |
-    |                [incident + repro evidence]
-    |                         |
-    +-- no AI in checks --> [Linear task - planned]
-                              |
-                         [Devin - planned]
-                              |
-                     [tested GitHub PR - planned]
-                              |
-                       [human approval]
-```
+- Unit: self-signed TLS is `tls_handshake_failure`; a closed port is `tcp_failure`.
+- Correlation negatives: both-fail, CONNECT fail, direct certificate fail, different targets stay `unclassified`.
+- Integration: the Issue #1 fixture must return `relay_path_tls_failure`.
 
-### Next steps
+## Scope
 
-1. Add reproducible fault injection with Docker Compose and Toxiproxy.
-2. Add a probe comparison engine for direct-versus-relayed requests.
-3. Publish labeled incident fixtures and accuracy/cost benchmarks.
-4. Integrate alert deduplication and a human-reviewed Devin PR workflow.
+Authorized checks of a host you name. No credentials, no auto-remediation, no production changes. Do not publish private hostnames or unsanitized logs.
 
-## Scope and safety
-
-This is a starter implementation for authorized testing, **not** a finished product. No credentials are needed. The probe only checks a host that the operator specifies; no automatic remediation or production deployment occurs. Avoid publishing private hosts, credentials, or unsanitized logs.
-
-## Inspiration and attribution
-
-Project concepts are informed by the ecosystem around Prometheus Blackbox Exporter and Shopify Toxiproxy. This repository does **not** claim ownership of those projects or copy their code.
+Inspired by Prometheus Blackbox Exporter and Shopify Toxiproxy. This repo does not copy their code.
