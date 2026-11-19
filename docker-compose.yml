@@ -1,0 +1,7 @@
+services:
+  issue1-repro:
+    image: golang:1.23-alpine
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace:ro
+    command: ["go", "test", "-tags=integration", "-run=^TestIssue1RelayTLSFailure$", "-count=1", "-v", "."]
